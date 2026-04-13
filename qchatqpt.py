@@ -47,9 +47,17 @@ from .install_packages.check_dependencies import check
 
 API_EXIST = False
 try:
-    check(['openai', 'SpeechRecognition', 'pyaudio', 'sounddevice', 'pyttsx3', 'pdfgpt'])
+    check(['openai', 'SpeechRecognition', 'pyaudio', 'sounddevice', 'pyttsx3'])
 finally:
-    import openai
+    # import openai
+    # use adesso ai hub instead
+    
+    from openai import OpenAI
+    
+    openai = OpenAI(
+        api_key=self.dlg.custom_apikey.text() or self.resp or "",
+        base_url="https://adesso-ai-hub.3asabc.de/v1"
+    )
 
     try:
         import speech_recognition as sr
@@ -59,10 +67,10 @@ finally:
         import pyttsx3
     except:
         pass
-    try:
-        from pdfgpt import *
-    except:
-        pass
+    # try:
+        # from pdfgpt import *
+    # except:
+        # pass
     API_EXIST = True
 
 try:
@@ -331,7 +339,19 @@ class qchatgpt:
         else:
             openai.api_key = self.resp  # General api
 
-        model = self.dlg.model.currentText()
+        # Use custom model name if provided, otherwise fall back to the combo-box selection
+        custom_model_text = self.dlg.custom_model.text().strip()
+        model = custom_model_text if custom_model_text else self.dlg.model.currentText()
+
+        # Re-create the OpenAI client if a custom base URL is set
+        custom_base_url_text = self.dlg.custom_base_url.text().strip()
+        if custom_base_url_text:
+            global openai
+            openai = OpenAI(
+                api_key=self.dlg.custom_apikey.text() or self.resp or "",
+                base_url=custom_base_url_text,
+            )
+
         max_tokens = self.dlg.max_tokens.value()
         try:
             ask = True
@@ -383,8 +403,8 @@ class qchatgpt:
                         document = QTextDocument()
                         document.setHtml("<img src='{}'>".format(data_uri))
                     else:
-                        if model in ["gpt-3.5-turbo", "gpt-3.5-turbo-0301", "gpt-4"]:
-                            self.response = openai.ChatCompletion.create(
+                        if model in ["gpt-oss-120b-sovereign", "qwen-3.5-122b-sovereign", "gpt-3.5-turbo", "gpt-3.5-turbo-0301", "gpt-4"] or custom_model_text:
+                            self.response = openai.chat.completions.create(
                                 model=model,
                                 max_tokens=max_tokens - len(self.question),
                                 temperature=temperature,
@@ -393,7 +413,8 @@ class qchatgpt:
                                 presence_penalty=0.6,
                                 messages=[{"role": "user", "content": self.question}]
                             )
-                            self.last_ans = self.response['choices'][0]['message']['content']
+                            self.last_ans = self.response.choices[0].message.content
+                            
                         else:
                             if self.dlg.qgiscode.isChecked():
                                 qq = " ".join(self.history) + " " + self.question + ', give code of qgis 3 pyqt ' \
@@ -401,9 +422,9 @@ class qchatgpt:
                             elif self.dlg.qgisui.isChecked():
                                 qq = " ".join(self.history) + " " + self.question + ' using QGIS'
                             else:
-
                                 qq = question_history
-                            self.response = openai.Completion.create(
+
+                            self.response = openai.chat.completions.create(
                                 engine=model,
                                 prompt=qq,
                                 temperature=temperature,
@@ -412,7 +433,7 @@ class qchatgpt:
                                 frequency_penalty=0.0,
                                 presence_penalty=0.6,
                             )
-                            self.last_ans = self.response['choices'][0]['text']
+                            self.last_ans = self.response.choices[0].text
 
                 except Exception as e:
                     self.iface.messageBar().pushMessage('QChatGPT',
@@ -422,7 +443,8 @@ class qchatgpt:
                                                         level=Qgis.Warning, duration=3)
                     self.dlg.send_chat.setEnabled(True)
                     self.dlg.question.setEnabled(True)
-                    return
+                    self.last_ans = str(e)
+                    #return
 
                 conversation_pair = self.question + " " + self.last_ans
                 self.history.append(conversation_pair)
