@@ -28,7 +28,7 @@ from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, Qt
 from qgis.core import QgsWkbTypes, QgsMapLayer
 from qgis.PyQt.QtGui import QPalette, QKeySequence, QTextCursor, QTextDocumentFragment, QTextDocument, QIcon, QFont
 from qgis.PyQt.QtWidgets import QAction, QMessageBox, QShortcut, QFileDialog, QSizePolicy, QWidget
-from qgis.core import QgsTask, QgsApplication, QgsMessageLog, QgsVectorLayer, QgsProject
+from qgis.core import QgsTask, QgsApplication, QgsMessageLog, QgsVectorLayer, QgsProject, NULL
 from qgis.utils import Qgis
 from qgis.PyQt.Qsci import QsciScintilla
 from openai import OpenAI
@@ -449,7 +449,6 @@ class qchatgpt:
                                 ]
                         )
                         self.last_ans = self.response.choices[0].message.content
-
                         QgsMessageLog.logMessage(f"Received {len(self.response.choices)} choices", 'QChatGPT', Qgis.Info)
                         
                 except Exception as e:
@@ -470,9 +469,9 @@ class qchatgpt:
                     self.history.append(conversation_pair)
                     last_ans = "AI: " + self.last_ans
                     self.answers.append(last_ans)
+                    # Initial implementation. Doesn't preserve newlines
+                    self.dlg.chatgpt_ans.append(last_ans)
 
-                # Initial implementation. Doesn't preserve newlines
-                self.dlg.chatgpt_ans.append(last_ans)
                 if self.dlg.image.isChecked():
                     current_document = self.dlg.chatgpt_ans.document()
                     cursor = QTextCursor(current_document)
@@ -492,7 +491,7 @@ class qchatgpt:
 
     def get_layers_xml(self):
         layer_xml = []
-        for layer in QgsProject.instance().mapLayers().values():
+        for layer in self.iface.mapCanvas().layers():
             source_path = layer.source()
             layer_name = layer.name()
             
@@ -506,43 +505,56 @@ class qchatgpt:
             layer_xml.append("<layer>")
             layer_xml.append(f"<name>{layer_name}</name>")
             layer_xml.append(f"<path>{source_path}</path>")
-            for f in features:
-                geometry_type = f.geometry().type()
-                isSingle = QgsWkbTypes.isSingleType(f.geometry().wkbType())
+            for feature in features:
+                geometry_type = feature.geometry().type()
+                isSingle = QgsWkbTypes.isSingleType(feature.geometry().wkbType())
                 if geometry_type == QgsWkbTypes.PointGeometry:
                     if(isSingle):
-                        point = f.geometry().asPoint()
+                        point = feature.geometry().asPoint()
                         layer_xml.append("<feature>")
-                        layer_xml.append(f"<location><x>{point.x()}</x><y>{point.y()}</y></location>")
+                        self.append_point(layer_xml, point)
+                        self.append_attributes(layer_xml, feature)
                         layer_xml.append("</feature>")
                     else:
-                        points = f.geometry().asMultiPoint()
+                        points = feature.geometry().asMultiPoint()
                         layer_xml.append("<feature>")
                         for point in points:
-                            layer_xml.append(f"<location><x>{point.x()}</x><y>{point.y()}</y></location>")
+                            self.append_point(layer_xml, point)
+                        self.append_attributes(layer_xml, feature)
                         layer_xml.append("</feature>")
                 elif geometry_type == QgsWkbTypes.PolygonGeometry:
                     if(isSingle):
-                        polygon = f.geometry().asPolygon()
+                        polygon = feature.geometry().asPolygon()
                         layer_xml.append("<feature>")
                         for ring in polygon:
                             layer_xml.append("<area>")
                             for point in ring:
-                                layer_xml.append(f"<point><x>{point.x()}</x><y>{point.y()}</y></point>")
+                                self.append_point(layer_xml, point)
                             layer_xml.append("</area>")
+                            self.append_attributes(layer_xml, feature)
                         layer_xml.append("</feature>")
                     else:
-                        multipolygons = f.geometry().asMultiPolygon()
+                        multipolygons = feature.geometry().asMultiPolygon()
                         layer_xml.append("<feature>")
                         for polygon in multipolygons:
                             for ring in polygon:
                                 layer_xml.append("<area>")
                                 for point in ring:
-                                    layer_xml.append(f"<point><x>{point.x()}</x><y>{point.y()}</y></point>")
+                                    self.append_point(layer_xml, point)
                                 layer_xml.append("</area>")
+                                self.append_attributes(layer_xml, feature)
                         layer_xml.append("</feature>")
             layer_xml.append("</layer>")
         return layer_xml
+
+    def append_point(self, layer_xml, point):
+        layer_xml.append(f"<location><x>{point.x()}</x><y>{point.y()}</y></location>")
+
+    def append_attributes(self, layer_xml, feature):
+        for field in feature.fields():
+            value = feature[field.name()]
+            if field.typeName() in ['String', 'Integer'] and value != NULL:
+                layer_xml.append(f"<{field.name()}>{value}</{field.name()}>")
 
     def export_messages(self, text='Export ChatGPT answers', ans=None):
         FILENAME = QFileDialog.getSaveFileName(None, text, os.path.join(
