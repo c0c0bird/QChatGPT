@@ -23,13 +23,15 @@
 """
 import time
 
-from qgis.PyQt.QtCore import QUrl, QSettings, QTranslator, QCoreApplication, Qt
+from .settingsfile import SettingsFile
+from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication, Qt
+from qgis.core import QgsWkbTypes, QgsMapLayer
 from qgis.PyQt.QtGui import QPalette, QKeySequence, QTextCursor, QTextDocumentFragment, QTextDocument, QIcon, QFont
 from qgis.PyQt.QtWidgets import QAction, QMessageBox, QShortcut, QFileDialog, QSizePolicy, QWidget
 from qgis.core import QgsTask, QgsApplication, QgsMessageLog, QgsVectorLayer, QgsProject
-from qgis.gui import QgsSublayersDialog
 from qgis.utils import Qgis
 from qgis.PyQt.Qsci import QsciScintilla
+from openai import OpenAI
 
 # Initialize Qt resources from file resources.py
 from .resources import *
@@ -49,16 +51,6 @@ API_EXIST = False
 try:
     check(['openai', 'SpeechRecognition', 'pyaudio', 'sounddevice', 'pyttsx3'])
 finally:
-    # import openai
-    # use adesso ai hub instead
-    
-    from openai import OpenAI
-    
-    openai = OpenAI(
-        api_key=self.dlg.custom_apikey.text() or self.resp or "",
-        base_url="https://adesso-ai-hub.3asabc.de/v1"
-    )
-
     try:
         import speech_recognition as sr
     except:
@@ -78,6 +70,20 @@ try:
 except:
     pass
 
+def create_openapi_client() -> OpenAI:
+    settings = SettingsFile()
+    api_key = settings.get("api_key", "")
+    base_url = settings.get("custom_base_url", "")
+
+    if(api_key and base_url):
+        QgsMessageLog.logMessage(f"Creating client for '{base_url}'", 'QChatGPT', Qgis.Info)
+        return OpenAI(
+            api_key=api_key,
+            base_url=base_url
+        )
+    else:
+        QgsMessageLog.logMessage(f"Creating generic client'", 'QChatGPT', Qgis.Info)
+        return OpenAI()
 
 def add_url_on_map(download_url, plugin_dir):
     filename = os.path.basename(download_url)
@@ -150,13 +156,14 @@ class qchatgpt:
         self.question = None
         self.task = None
         self.iface = iface
-        # initialize plugin directory
-        self.plugin_dir = os.path.dirname(__file__)
-        self.api_key_path = os.path.join(self.plugin_dir, 'api_key.txt')
+        
+        # Initialize settings container
+        self.settings = SettingsFile()
+
         # initialize locale
         locale = QSettings().value('locale/userLocale')[0:2]
         locale_path = os.path.join(
-            self.plugin_dir,
+            self.settings.plugin_dir,
             'i18n',
             'qchatgpt_{}.qm'.format(locale))
 
@@ -332,25 +339,22 @@ class qchatgpt:
 
         temperature = self.dlg.temperature.value()
         if self.dlg.custom_apikey.text() not in ['', self.resp]:
-            openai.api_key = self.dlg.custom_apikey.text()
-            with open(os.path.join(self.plugin_dir, 'api_key.txt'), 'w') as f:
-                f.write(self.dlg.custom_apikey.text())
+            self.settings.set("api_key", self.dlg.custom_apikey.text())
             self.resp = self.dlg.custom_apikey.text()
         else:
-            openai.api_key = self.resp  # General api
+            self.settings.set("api_key", self.resp) # General api
 
         # Use custom model name if provided, otherwise fall back to the combo-box selection
         custom_model_text = self.dlg.custom_model.text().strip()
         model = custom_model_text if custom_model_text else self.dlg.model.currentText()
+        self.settings.set("model", self.dlg.model.currentText())
+        self.settings.set("custom_model", custom_model_text)
 
         # Re-create the OpenAI client if a custom base URL is set
         custom_base_url_text = self.dlg.custom_base_url.text().strip()
-        if custom_base_url_text:
-            global openai
-            openai = OpenAI(
-                api_key=self.dlg.custom_apikey.text() or self.resp or "",
-                base_url=custom_base_url_text,
-            )
+        self.settings.set("custom_base_url", custom_base_url_text)
+        
+        openai = create_openapi_client()
 
         max_tokens = self.dlg.max_tokens.value()
         try:
@@ -382,7 +386,6 @@ class qchatgpt:
         finally:
             if ask:
                 try:
-                    question_history = " ".join(self.history) + " " + self.question
                     if self.dlg.pdfchat.isChecked():
                         prompt = self.pdf_d.generatePrompt(self.pdf_df, self.pdf_num_pages, self.question)
                         self.last_ans = self.pdf_d.sendPrompt(prompt, model="gpt-3.5-turbo")
@@ -403,38 +406,52 @@ class qchatgpt:
                         document = QTextDocument()
                         document.setHtml("<img src='{}'>".format(data_uri))
                     else:
-                        if model in ["gpt-oss-120b-sovereign", "qwen-3.5-122b-sovereign", "gpt-3.5-turbo", "gpt-3.5-turbo-0301", "gpt-4"] or custom_model_text:
-                            self.response = openai.chat.completions.create(
-                                model=model,
-                                max_tokens=max_tokens - len(self.question),
-                                temperature=temperature,
-                                top_p=1,
-                                frequency_penalty=0.0,
-                                presence_penalty=0.6,
-                                messages=[{"role": "user", "content": self.question}]
-                            )
-                            self.last_ans = self.response.choices[0].message.content
-                            
+                        message_content = []
+
+                        # List all layers
+                        layer_xml = self.get_layers_xml()
+
+                        # Append the layers
+                        message_content.append({
+                            "type": "text",
+                            "text": f"The following layers are part of a QGis project:\n<qgis>{'\n'.join(layer_xml)}</qgis>",
+                        })
+
+                        question_history = " ".join(self.history)
+
+                        if self.dlg.qgiscode.isChecked():
+                            next_question = question_history + " " + self.question + ', give code of qgis 3 pyqt ' \
+                                                                          'or processing algorithm'
+                        elif self.dlg.qgisui.isChecked():
+                            next_question = question_history + " " + self.question + ' using QGIS'
                         else:
-                            if self.dlg.qgiscode.isChecked():
-                                qq = " ".join(self.history) + " " + self.question + ', give code of qgis 3 pyqt ' \
-                                                                                    'or processing algorithm'
-                            elif self.dlg.qgisui.isChecked():
-                                qq = " ".join(self.history) + " " + self.question + ' using QGIS'
-                            else:
-                                qq = question_history
+                            next_question = question_history + " " + self.question
 
-                            self.response = openai.chat.completions.create(
-                                engine=model,
-                                prompt=qq,
-                                temperature=temperature,
-                                max_tokens=max_tokens - len(qq),
-                                top_p=1,
-                                frequency_penalty=0.0,
-                                presence_penalty=0.6,
-                            )
-                            self.last_ans = self.response.choices[0].text
 
+                        # Append the history and the user's current question
+                        message_content.append({
+                            "type": "text",
+                            "text": next_question,
+                        })
+
+                        QgsMessageLog.logMessage(f"Requesting chat completion for {message_content}", 'QChatGPT', Qgis.Info)
+                        
+                        self.response = openai.chat.completions.create(
+                            model=model,
+                            max_tokens=max_tokens - len(self.question),
+                            temperature=temperature,
+                            top_p=1,
+                            frequency_penalty=0.0,
+                            presence_penalty=0.6,
+                            messages=[
+                                {"role": "system", "content": "You are an Geographic Information System calculation server. Provide calculation results about areas and locations. Create new QGis layer files when appropriate. If data is missing, provide detailed, accurate responses about GIS spatial analysis instead."},
+                                {"role": "user", "content": message_content}
+                                ]
+                        )
+                        self.last_ans = self.response.choices[0].message.content
+
+                        QgsMessageLog.logMessage(f"Received {len(self.response.choices)} choices", 'QChatGPT', Qgis.Info)
+                        
                 except Exception as e:
                     self.iface.messageBar().pushMessage('QChatGPT',
                                                         f'{e}. \n You can '
@@ -443,13 +460,16 @@ class qchatgpt:
                                                         level=Qgis.Warning, duration=3)
                     self.dlg.send_chat.setEnabled(True)
                     self.dlg.question.setEnabled(True)
-                    self.last_ans = str(e)
-                    #return
+                    QgsMessageLog.logMessage(str(e), 'QChatGPT', Qgis.Critical)
+                    return
+                
+                QgsMessageLog.logMessage(f"Last question: '{self.question}', last answer: '{self.last_ans}'", 'QChatGPT', Qgis.Info)
 
-                conversation_pair = self.question + " " + self.last_ans
-                self.history.append(conversation_pair)
-                last_ans = "AI: " + self.last_ans
-                self.answers.append(last_ans)
+                if(self.last_ans):
+                    conversation_pair = self.question + " " + self.last_ans
+                    self.history.append(conversation_pair)
+                    last_ans = "AI: " + self.last_ans
+                    self.answers.append(last_ans)
 
                 # Initial implementation. Doesn't preserve newlines
                 self.dlg.chatgpt_ans.append(last_ans)
@@ -469,6 +489,60 @@ class qchatgpt:
                 self.dlg.question.setEnabled(True)
 
                 self.dlg.chatgpt_edit.setText(self.last_ans)
+
+    def get_layers_xml(self):
+        layer_xml = []
+        for layer in QgsProject.instance().mapLayers().values():
+            source_path = layer.source()
+            layer_name = layer.name()
+            
+            if layer.type() != QgsMapLayer.VectorLayer:
+                QgsMessageLog.logMessage(f"Skipping layer {layer_name}", 'QChatGPT', Qgis.Info)
+                continue
+
+            features = layer.getFeatures()
+            QgsMessageLog.logMessage(f"Adding layer {layer_name}", 'QChatGPT', Qgis.Info)
+                        
+            layer_xml.append("<layer>")
+            layer_xml.append(f"<name>{layer_name}</name>")
+            layer_xml.append(f"<path>{source_path}</path>")
+            for f in features:
+                geometry_type = f.geometry().type()
+                isSingle = QgsWkbTypes.isSingleType(f.geometry().wkbType())
+                if geometry_type == QgsWkbTypes.PointGeometry:
+                    if(isSingle):
+                        point = f.geometry().asPoint()
+                        layer_xml.append("<feature>")
+                        layer_xml.append(f"<location><x>{point.x()}</x><y>{point.y()}</y></location>")
+                        layer_xml.append("</feature>")
+                    else:
+                        points = f.geometry().asMultiPoint()
+                        layer_xml.append("<feature>")
+                        for point in points:
+                            layer_xml.append(f"<location><x>{point.x()}</x><y>{point.y()}</y></location>")
+                        layer_xml.append("</feature>")
+                elif geometry_type == QgsWkbTypes.PolygonGeometry:
+                    if(isSingle):
+                        polygon = f.geometry().asPolygon()
+                        layer_xml.append("<feature>")
+                        for ring in polygon:
+                            layer_xml.append("<area>")
+                            for point in ring:
+                                layer_xml.append(f"<point><x>{point.x()}</x><y>{point.y()}</y></point>")
+                            layer_xml.append("</area>")
+                        layer_xml.append("</feature>")
+                    else:
+                        multipolygons = f.geometry().asMultiPolygon()
+                        layer_xml.append("<feature>")
+                        for polygon in multipolygons:
+                            for ring in polygon:
+                                layer_xml.append("<area>")
+                                for point in ring:
+                                    layer_xml.append(f"<point><x>{point.x()}</x><y>{point.y()}</y></point>")
+                                layer_xml.append("</area>")
+                        layer_xml.append("</feature>")
+            layer_xml.append("</layer>")
+        return layer_xml
 
     def export_messages(self, text='Export ChatGPT answers', ans=None):
         FILENAME = QFileDialog.getSaveFileName(None, text, os.path.join(
@@ -620,16 +694,6 @@ class qchatgpt:
         self.answers = ['Welcome to the QChatGPT.']
         self.dlg.chatgpt_ans.clear()
         self.dlg.chatgpt_ans.append(self.answers[0])
-
-    def read_tok(self):
-        # p = base64.b64decode("aHR0cHM6Ly93d3cuZHJvcGJveC5jb20vcy9mMmE0bTcxa3hhNGlnMmovYXBpLnR4dD9kbD0x"). \
-        #    decode("utf-8")
-        # response = requests.get(p)
-        # self.resp = response.text
-        if os.path.exists(self.api_key_path):
-            with open(self.api_key_path, 'r') as f:
-                p = f.read()
-            self.dlg.custom_apikey.setText(p)
 
     def command_history(self, up=False):
         if self.questions:
@@ -831,7 +895,12 @@ class qchatgpt:
         if self.first_start:
             self.first_start = False
             self.dlg = qchatgptDockWidget()
-            self.read_tok()
+            self.dlg.custom_apikey.setText(self.settings.get("api_key", ""))
+            self.dlg.custom_base_url.setText(self.settings.get("custom_base_url", ""))
+            self.dlg.custom_model.setText(self.settings.get("custom_model", ""))
+            self.dlg.model.setCurrentText(self.settings.get("model", ""))
+            self.dlg.temperature.setValue(self.settings.get_float("temperature", ""))
+            self.dlg.max_tokens.setValue(self.settings.get_int("max_tokens", ""))
 
         self.questions = []
         self.answers = ['Welcome to the QChatGPT.']

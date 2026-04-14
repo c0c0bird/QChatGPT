@@ -1,0 +1,8 @@
+{
+  "api_key": "",
+  "model": "gpt-5.4",
+  "temperature": 0.1,
+  "max_tokens": 1024,
+  "custom_model": "",
+  "custom_base_url": ""
+}

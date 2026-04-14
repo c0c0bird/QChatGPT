@@ -465,32 +465,17 @@ p, li { white-space: pre-wrap; }
               </property>
               <item>
                <property name="text">
-                <string>gpt-oss-120b-sovereign</string>
+                <string>gpt-5.4</string>
                </property>
               </item>
               <item>
                <property name="text">
-                <string>qwen-3.5-122b-sovereign</string>
+                <string>gpt-5.4-mini</string>
                </property>
               </item>
               <item>
                <property name="text">
                 <string>text-davinci-003</string>
-               </property>
-              </item>
-              <item>
-               <property name="text">
-                <string>gpt-4</string>
-               </property>
-              </item>
-              <item>
-               <property name="text">
-                <string>gpt-3.5-turbo</string>
-               </property>
-              </item>
-              <item>
-               <property name="text">
-                <string>gpt-3.5-turbo-0301</string>
                </property>
               </item>
               <item>
