@@ -422,6 +422,10 @@ class qchatgpt:
                         if self.dlg.qgiscode.isChecked():
                             next_question = question_history + " " + self.question + ', give code of qgis 3 pyqt ' \
                                                                           'or processing algorithm'
+                        elif self.dlg.addprocessing.isChecked():
+                            next_question = question_history + " " + self.question + \
+                                            ', provide a complete, runnable Python script for QGIS 3 ' \
+                                            '(PyQGIS / Processing). Wrap the code in a single ```python ... ``` block.'
                         elif self.dlg.qgisui.isChecked():
                             next_question = question_history + " " + self.question + ' using QGIS'
                         else:
@@ -471,6 +475,21 @@ class qchatgpt:
                     self.answers.append(last_ans)
                     # Initial implementation. Doesn't preserve newlines
                     self.dlg.chatgpt_ans.append(last_ans)
+
+                    # ---- Processing-Script handling ----
+                    # Trigger when "Add Processing" radio is selected OR
+                    # when the answer looks like it contains Python code.
+                    add_proc_checked = (
+                        hasattr(self.dlg, 'addprocessing')
+                        and self.dlg.addprocessing.isChecked()
+                    )
+                    has_code = bool(self._extract_python_blocks(self.last_ans))
+                    if add_proc_checked and has_code:
+                        # Auto-run: no confirmation dialog needed.
+                        self.handle_processing_from_answer(self.last_ans, auto_run=True)
+                    elif not add_proc_checked and has_code:
+                        # Ask the user before running.
+                        self.handle_processing_from_answer(self.last_ans, auto_run=False)
 
                 if self.dlg.image.isChecked():
                     current_document = self.dlg.chatgpt_ans.document()
@@ -555,6 +574,121 @@ class qchatgpt:
             value = feature[field.name()]
             if field.typeName() in ['String', 'Integer'] and value != NULL:
                 layer_xml.append(f"<{field.name()}>{value}</{field.name()}>")
+
+    # ------------------------------------------------------------------
+    # Processing-Script helpers
+    # ------------------------------------------------------------------
+
+    def _extract_python_blocks(self, text):
+        """Return a list of Python code blocks found in *text*.
+
+        Looks for fenced ```python … ``` blocks first; if none are found
+        it falls back to plain ``` … ``` blocks.
+        """
+        blocks = re.findall(r'```python\s*(.*?)```', text, re.DOTALL)
+        if not blocks:
+            blocks = re.findall(r'```\s*(.*?)```', text, re.DOTALL)
+
+            
+        QgsMessageLog.logMessage(f"Text contains {len(blocks)} code blocks", 'QChatGPT', Qgis.Info)
+        return [b.strip() for b in blocks if b.strip()]
+
+    def _create_and_run_processing_script(self, code):
+        """Write *code* to a temp .py file and execute it via
+        ``processing.run`` or, if it is not a Processing algorithm,
+        run it directly in the QGIS Python environment."""
+        import traceback
+
+        # Write the code to a temporary file so it can be used as a
+        # Processing script provider entry point.
+        script_dir = os.path.join(self.settings.plugin_dir, 'temp', 'processing_scripts')
+        os.makedirs(script_dir, exist_ok=True)
+        script_path = os.path.join(
+            script_dir,
+            f'qchatgpt_script_{int(time.time())}.py'
+        )
+        with open(script_path, 'w', encoding='utf-8') as f:
+            f.write(code)
+
+        QgsMessageLog.logMessage(f"Created script in {script_path}", 'QChatGPT', Qgis.Info)
+
+        # Try to load it as a Processing script algorithm.
+        try:
+            #from qgis.core import QgsApplication
+            from processing.script.ScriptAlgorithm import ScriptAlgorithm  # type: ignore
+            import processing  # type: ignore
+
+            alg = ScriptAlgorithm(descriptionFile=script_path)
+            alg.initAlgorithm()
+
+            # Run with an empty parameter dict; the algorithm itself
+            # should define sensible defaults or require no input.
+            processing.run(alg, {})
+            self.iface.messageBar().pushMessage(
+                'QChatGPT',
+                f'Processing script executed: {os.path.basename(script_path)}',
+                level=Qgis.Success, duration=4
+            )
+            return
+        except Exception as e:
+            QgsMessageLog.logMessage(f"Cannot save script. {str(e)}", Qgis.Critical)
+            pass  # Not a valid Processing algorithm – fall through.
+
+        # Fallback: execute the code directly in the QGIS environment.
+        try:
+            exec_globals = {
+                'iface': self.iface,
+                '__builtins__': __builtins__,
+            }
+            exec(
+                "import qgis\n"
+                "from qgis.PyQt.QtCore import *\n"
+                "from qgis.PyQt.QtGui import *\n"
+                "from qgis.PyQt.QtWidgets import *\n"
+                "from qgis.core import *\n"
+                "from qgis.gui import *\n"
+                "from qgis.utils import *\n"
+                + code,
+                exec_globals
+            )
+            self.iface.messageBar().pushMessage(
+                'QChatGPT',
+                'Python code from LLM executed successfully.',
+                level=Qgis.Success, duration=4
+            )
+        except Exception as e:
+            self.iface.messageBar().pushMessage(
+                'QChatGPT',
+                f'Error executing LLM script: {e}',
+                level=Qgis.Critical, duration=6
+            )
+            QgsMessageLog.logMessage(traceback.format_exc(), 'QChatGPT', Qgis.Critical)
+
+    def handle_processing_from_answer(self, answer_text, auto_run):
+        """Detect Python code blocks in *answer_text* and – depending on
+        *auto_run* – either run them immediately or ask the user first."""
+        blocks = self._extract_python_blocks(answer_text)
+        if not blocks:
+            QgsMessageLog.logMessage(f"No Python blocks found", 'QChatGPT', Qgis.Info)
+            return  # Nothing to do.
+
+        if auto_run:
+            QgsMessageLog.logMessage(f"{len(blocks)} Python blocks found", 'QChatGPT', Qgis.Info)
+            for code in blocks:
+                self._create_and_run_processing_script(code)
+        else:
+            msg = (
+                f"The LLM response contains {len(blocks)} Python code block(s).\n"
+                "Do you want to create and run them as Processing script(s)?"
+            )
+            self.showYesNoMessage(
+                'QChatGPT – Run Processing Script?',
+                msg,
+                lambda: [self._create_and_run_processing_script(c) for c in blocks],
+                'Info'
+            )
+
+    # ------------------------------------------------------------------
 
     def export_messages(self, text='Export ChatGPT answers', ans=None):
         FILENAME = QFileDialog.getSaveFileName(None, text, os.path.join(

@@ -125,6 +125,16 @@ p, li { white-space: pre-wrap; }
              </widget>
             </item>
             <item>
+             <widget class="QRadioButton" name="addprocessing">
+              <property name="toolTip">
+               <string>Automatically create and run Python code suggested by the LLM as a Processing script</string>
+              </property>
+              <property name="text">
+               <string>Add Processing</string>
+              </property>
+             </widget>
+            </item>
+            <item>
              <widget class="Line" name="line">
               <property name="maximumSize">
                <size>
