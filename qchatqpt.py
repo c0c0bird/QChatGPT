@@ -632,7 +632,7 @@ class qchatgpt:
             )
             return
         except Exception as e:
-            QgsMessageLog.logMessage(f"Cannot save script. {str(e)}", Qgis.Critical)
+            QgsMessageLog.logMessage(f"Cannot save script. {str(e)}", 'QChatGPT', Qgis.Critical)
             pass  # Not a valid Processing algorithm – fall through.
 
         # Fallback: execute the code directly in the QGIS environment.
