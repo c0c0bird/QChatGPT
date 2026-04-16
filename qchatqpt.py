@@ -461,10 +461,11 @@ class qchatgpt:
                                                         f'find your API key at'
                                                         f' https://platform.openai.com/account/api-keys.',
                                                         level=Qgis.Warning, duration=3)
-                    self.dlg.send_chat.setEnabled(True)
-                    self.dlg.question.setEnabled(True)
                     QgsMessageLog.logMessage(str(e), 'QChatGPT', Qgis.Critical)
                     return
+                finally:
+                    self.dlg.send_chat.setEnabled(True)
+                    self.dlg.question.setEnabled(True)
                 
                 QgsMessageLog.logMessage(f"Last question: '{self.question}', last answer: '{self.last_ans}'", 'QChatGPT', Qgis.Info)
 
